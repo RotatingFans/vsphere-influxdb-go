@@ -246,6 +246,111 @@ func (vcenter *VCenter) Query(config Configuration, InfluxDBClient influxclient.
 		mors = append(mors, containerView.View...)
 	}
 
+		// Create MORS for each object type
+	vm_refs := []types.ManagedObjectReference{}
+	host_refs := []types.ManagedObjectReference{}
+	cluster_refs := []types.ManagedObjectReference{}
+
+	new_mors := []types.ManagedObjectReference{}
+
+	spew.Dump(mors)
+	// Assign each MORS type to a specific array
+	for _, mor := range mors {
+		if mor.Type == "VirtualMachine" {
+			vm_refs = append(vm_refs, mor)
+			new_mors = append(new_mors, mor)
+		} else if mor.Type == "HostSystem" {
+			host_refs = append(host_refs, mor)
+			new_mors = append(new_mors, mor)
+		} else if mor.Type == "ClusterComputeResource" {
+			cluster_refs = append(cluster_refs, mor)
+		}
+	}
+	// Copy  the mors without the clusters
+	mors = new_mors
+
+	pc := property.DefaultCollector(client.Client)
+
+	// Retrieve properties for all vms
+	var vmmo []mo.VirtualMachine
+	err = pc.Retrieve(ctx, vm_refs, []string{"summary"}, &vmmo)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+
+	// Retrieve properties for hosts
+	var hsmo []mo.HostSystem
+	err = pc.Retrieve(ctx, host_refs, []string{"summary"}, &hsmo)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+
+	// Initialize the map that will hold the VM MOR to cluster reference
+	vmToCluster := make(map[types.ManagedObjectReference]string)
+
+	// Retrieve properties for clusters, if any
+	if len(cluster_refs) > 0 {
+		if debug == true {
+			stdlog.Println("going inside clusters")
+		}
+		var clmo []mo.ClusterComputeResource
+		err = pc.Retrieve(ctx, cluster_refs, []string{"name", "configuration"}, &clmo)
+		if err != nil {
+			fmt.Println(err)
+			return
+		}
+		for _, cl := range clmo {
+			if debug == true {
+				stdlog.Println("---cluster name - you should see every cluster here---")
+				stdlog.Println(cl.Name)
+				stdlog.Println("You should see the cluster object, clsuter configuration object, and cluster configuration dasvmconfig which should contain all VMs")
+				spew.Dump(cl)
+				spew.Dump(cl.Configuration)
+				spew.Dump(cl.Configuration.DasVmConfig)
+			}
+			for _, vm := range cl.Configuration.DasVmConfig {
+				if debug == true {
+					stdlog.Println("--VM ID - you should see every VM ID here--")
+					stdlog.Println(vm.Key.Value)
+				}
+
+				vmToCluster[vm.Key] = cl.Name
+			}
+		}
+	}
+
+	// Retrieve properties for the hosts
+	host_summary := make(map[types.ManagedObjectReference]map[string]string)
+	host_extra_metrics := make(map[types.ManagedObjectReference]map[string]int64)
+
+	for _, host := range hsmo {
+		host_summary[host.Self] = make(map[string]string)
+		host_summary[host.Self]["name"] = host.Summary.Config.Name
+		host_extra_metrics[host.Self] = make(map[string]int64)
+		host_extra_metrics[host.Self]["cpu_corecount_total"] = int64(host.Summary.Hardware.NumCpuThreads)
+	}
+
+	// Initialize the map that will hold all extra tags
+	vm_summary := make(map[types.ManagedObjectReference]map[string]string)
+
+	// Assign extra details per VM in vm_summary
+	for _, vm := range vmmo {
+		vm_summary[vm.Self] = make(map[string]string)
+		// Ugly way to extract datastore value
+		re, err := regexp.Compile(`\[(.*?)\]`)
+		if err != nil {
+			fmt.Println(err)
+		}
+		vm_summary[vm.Self]["datastore"] = strings.Replace(strings.Replace(re.FindString(fmt.Sprintln(vm.Summary.Config)), "[", "", -1), "]", "", -1)
+		if vmToCluster[vm.Self] != "" {
+			vm_summary[vm.Self]["cluster"] = vmToCluster[vm.Self]
+		}
+		vm_summary[vm.Self]["esx"] = host_summary[*vm.Summary.Runtime.Host]["name"]
+}
+	
+	
 	// get object names
 	objects := []mo.ManagedEntity{}
 
